@@ -1,84 +1,80 @@
-Kubernetes Cluster Setup on AWS EC2
+# 🚀 Kubernetes Cluster Setup on AWS EC2
 
-This documentation covers setting up a Kubernetes cluster on Ubuntu EC2 instances (Master + Worker nodes) after EC2 instances are already launched. It includes steps for Docker, Kubernetes installation, networking (Calico), and Ingress controller (NGINX).
+This guide documents the complete process of setting up a **Kubernetes cluster on AWS EC2 (Ubuntu)** using `kubeadm`.  
+It assumes that **EC2 instances are already launched** and focuses on installing Docker, Kubernetes components, networking, and ingress.
 
-Table of Contents
+---
 
-Prerequisites
+## 🧭 Architecture Overview
 
-Install Docker
+AWS VPC
+├── Control Plane (Master Node)
+│ └── kube-apiserver, controller-manager, scheduler
+├── Worker Node 1
+├── Worker Node 2
+└── Pod Network (Calico CNI)
 
-Install Kubernetes Components
+yaml
+Copy code
 
-Configure Kernel Modules & Sysctl
+---
 
-Initialize Master Node
+## 📋 Prerequisites
 
-Join Worker Nodes
+- Ubuntu 20.04 / 22.04 EC2 instances
+- 1 Master node + 1 or more Worker nodes
+- Security Group rules:
+  - SSH → `22`
+  - Kubernetes API → `6443`
+  - NodePort → `30000–32767`
+  - All traffic allowed between cluster nodes
+- `sudo` access on all machines
 
-Deploy Network & Ingress
+---
 
-Verify Cluster
+## 🐳 Step 1: Install Docker  
+**(Run on Master & Worker nodes)**
 
-Scripts
-
-Screenshots
-
-Prerequisites
-
-Ubuntu 20.04 EC2 instances
-
-Security groups allow:
-
-SSH (22)
-
-Kubernetes API (6443)
-
-NodePorts (30000-32767)
-
-Internal traffic between nodes (all TCP/UDP)
-
-Key pair for SSH access
-
-Instances reachable via private/public IPs
-
-Install Docker
-
-Run on Master and Worker nodes:
-
+```bash
 sudo apt update
 sudo apt install docker.io -y
 sudo systemctl enable docker
 sudo systemctl start docker
 sudo chmod 666 /var/run/docker.sock
+Verify:
 
-
-Verify Docker:
-
+bash
+Copy code
 docker --version
+☸️ Step 2: Install Kubernetes Components
+(Run on Master & Worker nodes)
 
-Install Kubernetes Components
-
-Run on Master and Worker nodes:
-
+bash
+Copy code
 sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
 sudo mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key \
+ | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' \
+| sudo tee /etc/apt/sources.list.d/kubernetes.list
+
 sudo apt update
 sudo apt install -y kubeadm=1.28.1-1.1 kubelet=1.28.1-1.1 kubectl=1.28.1-1.1
 sudo apt-mark hold kubeadm kubelet kubectl
+Verify:
 
-
-Verify installation:
-
+bash
+Copy code
 kubeadm version
 kubectl version --client
+🔧 Step 3: Kernel & Sysctl Configuration
+(Mandatory – Run on all nodes)
 
-Configure Kernel Modules & Sysctl
-
-Run on all nodes:
-
+bash
+Copy code
 sudo modprobe br_netfilter
 
 cat <<EOF | sudo tee /etc/sysctl.d/kubernetes.conf
@@ -88,81 +84,54 @@ net.ipv4.ip_forward = 1
 EOF
 
 sudo sysctl --system
+✅ These settings persist across reboots.
 
-Initialize Master Node
+🎯 Step 4: Initialize the Master Node
+(Run only on Master node)
 
-Run on Master node only:
-
+bash
+Copy code
 sudo kubeadm init --pod-network-cidr=192.168.0.0/16
+Configure kubectl
+For normal user
 
-
-Set up kubectl access:
-
+bash
+Copy code
 mkdir -p $HOME/.kube
-sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
+For root user
 
-
-Alternatively, for root user:
+bash
+Copy code
 export KUBECONFIG=/etc/kubernetes/admin.conf
+📌 Save the kubeadm join command printed at the end.
 
+🔗 Step 5: Join Worker Nodes
+(Run on each Worker node)
 
-Copy the kubeadm join command output for the worker nodes—it will be used in the next step.
-On each Worker node:
+If the node was previously joined:
 
-sudo kubeadm reset -f  # Only if previous attempts failed
-sudo kubeadm join <MASTER_IP>:6443 --token <TOKEN> \
-    --discovery-token-ca-cert-hash sha256:<HASH>
+bash
+Copy code
+sudo kubeadm reset -f
+Join the cluster:
 
-
-Verify nodes on Master:
-
-kubectl get nodes
-
-
-If nodes show NotReady, wait a few minutes for network pods to start.
-
-Deploy Network & Ingress
-Deploy Calico CNI:
+bash
+Copy code
+sudo kubeadm join <MASTER_PRIVATE_IP>:6443 \
+ --token <TOKEN> \
+ --discovery-token-ca-cert-hash sha256:<HASH>
+🌐 Step 6: Install Pod Network (Calico)
+bash
+Copy code
 kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
-
-Deploy NGINX Ingress Controller:
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.49.0/deploy/static/provider/baremetal/deploy.yaml
-
-Verify Cluster
-
-Check node status:
-
+🚪 Step 7: Install NGINX Ingress Controller
+bash
+Copy code
+kubectl apply -f \
+https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.49.0/deploy/static/provider/baremetal/deploy.yaml
+✅ Step 8: Verify Cluster Status
+bash
+Copy code
 kubectl get nodes
-
-
-Check system pods:
-
-kubectl get pods -n kube-system -o wide
-
-Scripts
-
-You can create a shell script (k8s-setup.sh) with all repetitive steps:
-
-#!/bin/bash
-set -e
-
-# Docker & Kubernetes prerequisites
-sudo apt update
-sudo apt install docker.io -y
-sudo chmod 666 /var/run/docker.sock
-
-sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
-sudo mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt update
-sudo apt install -y kubeadm=1.28.1-1.1 kubelet=1.28.1-1.1 kubectl=1.28.1-1.1
-sudo apt-mark hold kubeadm kubelet kubectl
-
-# Kernel modules & sysctl
-sudo modprobe br_netfilter
-sudo sysctl --system
-Join Worker Nodes
-
-
