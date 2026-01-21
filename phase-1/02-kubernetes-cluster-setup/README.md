@@ -1,157 +1,116 @@
-# 🚀 Kubernetes Cluster Setup on AWS EC2
+🛠️ Section A: Prepare All Nodes
+Perform these steps on both the Master and all Worker nodes.
 
-This guide provides a **complete, step-by-step process** to set up a production-ready **Kubernetes cluster on AWS EC2 (Ubuntu)** using `kubeadm`. 
+Step 1: Disable Swap
+Kubernetes requires swap to be off to manage resources accurately.
 
-**Assumes EC2 instances are already launched** - focuses on Docker, Kubernetes components, CNI networking, and Ingress setup.
+Bash
 
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28-blueviolet?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
-[![Docker](https://img.shields.io/badge/Docker-20.10-green?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Calico](https://img.shields.io/badge/CNI-Calico-orange?logo=projectcalico&logoColor=white)](https://projectcalico.org/)
+sudo swapoff -a
+sudo sed -i '/ swap / s/^/#/' /etc/fstab
+Success Check: Run free -m. The "Swap" row should show 0.
 
----
+Step 2: Load Kernel Modules
+We need to enable the overlay and br_netfilter modules so the nodes can handle network traffic correctly.
 
-## 🧭 Architecture Overview
+Bash
 
-AWS VPC
-├── Control Plane (Master Node)
-│ └── kube-apiserver, controller-manager, scheduler
-├── Worker Node 1
-├── Worker Node 2
-└── Pod Network (Calico CNI)
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
 
-text
-
-**Cluster Specs:**
-- **Master Node**: 1 instance (t3.medium recommended)
-- **Worker Nodes**: 1+ instances (t3.small/medium)
-- **Pod CIDR**: `192.168.0.0/16`
-- **CNI**: Calico
-- **Ingress**: NGINX Controller
-
----
-
-## 📋 Prerequisites
-
-Before starting, ensure:
-
-- **Ubuntu 20.04/22.04** EC2 instances launched
-- **1 Master + 1+ Worker nodes** with same VPC
-- **Security Group** allows:
-SSH: TCP 22
-K8s API Server: TCP 6443
-NodePort Range: TCP 30000-32767
-Intra-cluster: All traffic (same SG)
-
-text
-
-- **`sudo` access** on all nodes
-- **Private IP connectivity** between all nodes
-
----
-
-## 🚀 Step-by-Step Setup
-
-### 🐳 Step 1: Install Docker
-**Run on ALL nodes (Master + Workers)**
-
-```bash
-sudo apt update && sudo apt install docker.io -y
-sudo systemctl enable docker && sudo systemctl start docker
-sudo chmod 666 /var/run/docker.sock
-Verify:
-
-bash
-docker --version
-☸️ Step 2: Install Kubernetes Components
-Run on ALL nodes
-
-bash
-# Add Kubernetes apt repository
-sudo apt-get update && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
-sudo mkdir -p -m 755 /etc/apt/keyrings
-
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-
-# Install specific versions
-sudo apt update
-sudo apt install -y kubeadm=1.28.1-1.1 kubelet=1.28.1-1.1 kubectl=1.28.1-1.1
-sudo apt-mark hold kubeadm kubelet kubectl
-Verify:
-
-bash
-kubeadm version
-kubectl version --client
-🔧 Step 3: Configure Kernel & Sysctl
-Run on ALL nodes (REQUIRED)
-
-bash
+sudo modprobe overlay
 sudo modprobe br_netfilter
+Step 3: Configure Networking
+This allows the bridge to see bridged traffic and enables IP forwarding.
 
-cat <<EOF | sudo tee /etc/sysctl.d/kubernetes.conf
+Bash
+
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
 
 sudo sysctl --system
-🎯 Step 4: Initialize Master Node
-Run ONLY on Master node
+Step 4: Install & Configure containerd
+Containerd is our runtime (the engine that runs the containers).
 
-bash
+Bash
+
+sudo apt update && sudo apt install -y containerd
+
+# Initialize default configuration
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+
+# Set SystemdCgroup to true (required for Kubelet stability)
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+sudo systemctl restart containerd
+Step 5: Install Kubernetes Tools
+We install the "Big Three": kubeadm (the installer), kubelet (the node manager), and kubectl (the command tool).
+
+Bash
+
+sudo apt update && sudo apt install -y apt-transport-https ca-certificates curl gpg
+sudo mkdir -p /etc/apt/keyrings
+
+# Add the official Kubernetes keyring
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+# Add the repository
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+# Install specific version 1.28
+sudo apt update
+sudo apt install -y kubeadm=1.28.1-1.1 kubelet=1.28.1-1.1 kubectl=1.28.1-1.1
+sudo apt-mark hold kubeadm kubelet kubectl
+🧠 Section B: Initialize the Master
+Perform these steps ONLY on the Master node.
+
+Step 6: Initialize the Cluster
+This sets up the control plane. We use a specific CIDR range that Calico (our network provider) expects.
+
+Bash
+
 sudo kubeadm init --pod-network-cidr=192.168.0.0/16
-Configure kubectl for current user:
+Step 7: Configure Local Access
+This allows your current user to run kubectl commands without needing sudo.
 
-bash
+Bash
+
 mkdir -p $HOME/.kube
-sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
-💾 SAVE THE kubeadm join command printed at the end!
+Step 8: Install Calico (The Network)
+Until you install a CNI (Container Network Interface), your pods won't be able to communicate.
 
-🔗 Step 5: Join Worker Nodes
-Run on EACH Worker node
+Bash
 
-If previously joined:
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.1/manifests/calico.yaml
+🔌 Section C: Connect the Workers
+Perform these steps ONLY on Worker nodes.
 
-bash
-sudo kubeadm reset -f
-Join cluster:
+Step 9: Join the Cluster
+On your Master node, run this to get your unique join command:
 
-bash
-sudo kubeadm join <MASTER_PRIVATE_IP>:6443 \
-  --token <TOKEN> \
-  --discovery-token-ca-cert-hash sha256:<HASH>
-🌐 Step 6: Install Calico CNI
-Run on Master node
+Bash
 
-bash
-kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
-Wait 1-2 minutes for pods to be ready:
+kubeadm token create --print-join-command
+Copy the output and run it on your Worker nodes with sudo.
 
-bash
-kubectl get pods -n calico-system
-🚪 Step 7: Install NGINX Ingress Controller
-Run on Master node
+✅ Section D: Final Validation
+Step 10: Verify the Cluster
+Back on the Master node, check the status of your nodes:
 
-bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.49.0/deploy/static/provider/baremetal/deploy.yaml
-✅ Step 8: Verify Cluster
-Run on Master node
+Bash
 
-bash
-# Check nodes status
 kubectl get nodes
+Expected Result: You should see your Master and Worker nodes listed as Ready.
 
-# Check all pods
-kubectl get pods --all-namespaces
+📖 Common Fixes
+Nodes stuck in NotReady: Give Calico about 2 minutes to initialize. Check status with kubectl get pods -n kube-system.
 
-# Check ingress controller
-kubectl get pods -n ingress-nginx
-Expected Output:
-
-text
-NAME               STATUS   ROLES           AGE    VERSION
-master-node        Ready    control-plane   5m     v1.28.1
-worker-1           Ready    <none>          2m     v1.28.1
-worker-2           Ready    <none>          1m     v1.28.1
+Kubelet won't start: Double-check that Swap is truly off (swapoff -a).
